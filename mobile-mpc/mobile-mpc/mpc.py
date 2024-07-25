@@ -2,85 +2,96 @@ import rclpy
 from rclpy.node import Node
 
 import numpy as np
-from pydrake.all import MathematicalProgram, Solve, Variable
-from pydrake.solvers import MathematicalProgram, Solve
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
 
-dt = 0.01
-N = 5  # 예측 시간 범위 (시간 스텝 수)
+from trajectory import *
+from utils import UTILS
 
+'''
+
+state : robot position [x, y, theta]
+input : wheel steering / speed [gamma_fl,fr,rl,rr , omega_fl,fr,rl,rr]
+
+cost : path tracking error minimize + input vector minimize + slip angle minimize
+constraints : single ICR, min/max motor velocity, vehicle dynamic
+
+'''
+
+mpc_utils = UTILS()
 
 class MPC:
 
-    def __init__(self):
-        pass
+    def __init__(self, trajecrory, initial_state):
+        self.horizon = 5
+        self.dt = 0.01
+        self.trajectory = trajecrory
+        self.state = initial_state
+
+        self.U = np.ones(8 * self.horizon)
+        self.Q = 0.1
+        self.R = 0.1
+
+    def CostFunction(self, *args):
+        init_state, ref_points, N, Q, R = args
+        cost = 0
+        _state = np.copy(init_state)
+        
+        for t in range(N):
+            _input = self.U [8*t:8*(t+1)]
+            cost_state_error = mpc_utils.StateErrorCost(ref_points[t], _state, self.Q)
+            cost_input_minimize = mpc_utils.InputMinimizeCost(self, _input, self.R)
+            cost += cost_state_error + cost_input_minimize
+            _state = mpc_utils.VehicleModel(_state, _input)
+        
+        return cost
     
-
-
-    def simulate_mpc(self, x0, target_path_x, target_path_y, target_path_yaw):
-        # MPC 파라미터
+    def constraint_function(self, U, *args):
+        x_init, N = args
+        x = np.copy(x_init)
+        constraints = []
         
+        for t in range(N):
+            u = U[8*t:8*(t+1)]
+            V_x = [u[4 + i] * r * np.cos(u[i]) for i in range(4)]
+            V_y = [u[4 + i] * r * np.sin(u[i]) for i in range(4)]
+            
+            v_x = np.mean(V_x)
+            v_y = np.mean(V_y)
+            omega = (V_y[1] - V_y[3]) / L - (V_x[0] - V_x[2]) / W
+            
+            constraints.extend([
+                V_x[0] - (v_x - omega * (L/2)),
+                V_y[0] - (v_y + omega * (W/2)),
+                V_x[1] - (v_x - omega * (L/2)),
+                V_y[1] - (v_y - omega * (W/2)),
+                V_x[2] - (v_x + omega * (L/2)),
+                V_y[2] - (v_y + omega * (W/2)),
+                V_x[3] - (v_x + omega * (L/2)),
+                V_y[3] - (v_y - omega * (W/2))
+            ])
+            
+            x = dynamics(x, u)
+        
+        return constraints
+    def mpc(self):
+   
         # 최적화 문제 설정
-        prog = MathematicalProgram()
-        
-        # 변수 정의 (상태 및 입력)
-        x = prog.NewContinuousVariables(N+1, 'x')
-        y = prog.NewContinuousVariables(N+1, 'y')
-        yaw = prog.NewContinuousVariables(N+1, 'yaw')
-        vx = prog.NewContinuousVariables(N, 'vx')
-        
-        vy = prog.NewContinuousVariables(N, 'vy')
-        omega = prog.NewContinuousVariables(N, 'omega')
-        
-        # 초기 상태 설정
-        prog.AddBoundingBoxConstraint(x0[0], x0[0], x[0])
-        prog.AddBoundingBoxConstraint(x0[1], x0[1], y[0])
-        prog.AddBoundingBoxConstraint(x0[2], x0[2], yaw[0])
+        args = (self.state, x_ref, N, Q, R)
+        constraints = [{'type': 'eq', 'fun': constraint_function, 'args': (x_current, N)}]
+        result = minimize(cost_function, U0, args=args, constraints=constraints, method='SLSQP', options={'disp': False, 'maxiter': 500})
 
-        #최대/최소 속도 제약 조건
-        prog.AddBoundingBoxConstraint(-MAX_CONST_SPEED_X, MAX_CONST_SPEED_X, vx[0])
-        prog.AddBoundingBoxConstraint(-MAX_CONST_SPEED_Y, MAX_CONST_SPEED_Y, vy[0])
-        prog.AddBoundingBoxConstraint(-MAX_CONST_SPEED_W, MAX_CONST_SPEED_W, omega[0])
-
-        # # 동역학 제약 조건
-        for i in range(N):
-            # prog.AddConstraint(x[i+1] == x[i] + dt * (vx[i] * np.cos(yaw[i]) - vy[i] * np.sin(yaw[i])))
-            # prog.AddConstraint(y[i+1] == y[i] + dt * (vx[i] * np.sin(yaw[i]) + vy[i] * np.cos(yaw[i])))
-            prog.AddConstraint(x[i+1] == x[i] + dt * (vx[i] * np.cos(yaw[i]) - vy[i] * np.sin(yaw[i])))
-            prog.AddConstraint(y[i+1] == y[i] + dt * (vx[i] * np.sin(yaw[i]) + vy[i] * np.cos(yaw[i])))
-            prog.AddConstraint(yaw[i+1] == yaw[i] + dt * omega[i])
-
-
-        # 목표 함수 (경로 오차 최소화)
-        for i in range(N+1):
-            prog.AddCost(Q_distance * (x[i] - target_path_x[i])**2)
-            prog.AddCost(Q_distance * (y[i] - target_path_y[i])**2)
-            prog.AddCost(Q_angle * (yaw[i] - target_path_yaw[i])**2)
-
-        #입력 변화 최소화 (옵션)
-        for i in range(N-1):
-            prog.AddCost(100*(vx[i+1] - vx[i])**2)
-            prog.AddCost(100*(vy[i+1] - vy[i])**2)
-            prog.AddCost(100*(omega[i+1] - omega[i])**2)
-
-        
-        # 최적화 문제 해결
-        result = Solve(prog)
-        
-        # 결과 확인
-        
-        if result.is_success():
-            optimized_x = result.GetSolution(x)
-            optimized_y = result.GetSolution(y)
-            optimized_yaw = result.GetSolution(yaw)
-            optimized_vx = result.GetSolution(vx)
-            optimized_vy = result.GetSolution(vy)
-            optimized_omega = result.GetSolution(omega)
-
-            return optimized_x, optimized_y, optimized_yaw, optimized_vx, optimized_vy, optimized_omega
-
-        else:
-            pass
-
-    def iteration(self):
+        # 최적화 결과에서 입력 추출
+        U_opt = result.x
+        u_opt = U_opt[:8]
+        # 상태 갱신
+        x_current = dynamics(x_current, u_opt)
+        x_history.append(x_current)
+    
+    def run(self):
         pass
+
+if __name__ == '__main__':
+    mpc = MPC()
+    mpc.run()
 

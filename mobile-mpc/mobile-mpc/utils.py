@@ -1,34 +1,11 @@
 import numpy as np
-import cvxpy as cp
-
-# 로봇의 기하학적 특성
-L = 1.0  # 휠베이스 (미터)
-W = 1.0  # 트랙 (미터)
-r = 0.1  # 휠 반지름 (미터)
-
-# 예측 시간 단계
-N = 10
-
-# 상태 벡터와 입력 벡터 정의
-x = cp.Variable((3, N + 1))  # [x, y, theta]
-u = cp.Variable((8, N))  # [delta_fl, delta_fr, delta_rl, delta_rr, omega_fl, omega_fr, omega_rl, omega_rr]
-
-# 초기 상태와 목표 경로
-x_init = np.array([0, 0, 0])
-trajectory = np.array([np.linspace(0, 10, N + 1), np.linspace(0, 10, N + 1), np.zeros(N + 1)])
-
-# 비용 함수 가중치
-Q = np.diag([1.0, 1.0, 1.0])  # 상태 오차 비용
-R = np.diag([0.1] * 4 + [1.0] * 4)  # 입력 비용
-
-
 
 
 class UTILS:
     def __init__(self):
 
-        self.r = 0.1  # 휠 반지름 (미터)
-        self.dt = 0.12 # [m]
+        self.r = 0.1  # wheel radius [m]
+        self.dt = 0.1 # [s]
         
         self.body_x_length = 0.9  # forward
         self.body_y_length = 0.6
@@ -42,7 +19,7 @@ class UTILS:
         self.fl_xy = (0.35, 0.25)
 
 
-    def VehicleModel(self):
+    def VehicleModel(self, _state, _u):
         '''
         assumption : single ICR(non slip)
 
@@ -56,29 +33,41 @@ class UTILS:
         return : next time robot body position new_x, new_y, new_theta
         '''
 
-        V_x = [u[4 + i] * r * np.cos(u[i]) for i in range(4)]
-        V_y = [u[4 + i] * r * np.sin(u[i]) for i in range(4)]
+        V_x = [_u[4 + i] * self.r * np.cos(_u[i]) for i in range(4)]
+        V_y = [_u[4 + i] * self.r * np.sin(_u[i]) for i in range(4)]
         
         x_dot = np.mean(V_x)
         y_dot = np.mean(V_y)
         theta_dot = (V_y[1] - V_y[3]) / self.wheel_y_length - (V_x[0] - V_x[2]) / self.wheel_x_length
         
-        new_x = x[0] + x_dot * np.cos(x[2]) * self.dt - y_dot * np.sin(x[2]) * self.dt
-        new_y = x[1] + x_dot * np.sin(x[2]) * self.dt + y_dot * np.cos(x[2]) * self.dt
-        new_theta = x[2] + theta_dot * self.dt
+        new_x = _state[0] + x_dot * np.cos(_state[2]) * self.dt - y_dot * np.sin(_state[2]) * self.dt
+        new_y = _state[1] + x_dot * np.sin(_state[2]) * self.dt + y_dot * np.cos(_state[2]) * self.dt
+        new_theta = _state[2] + theta_dot * self.dt
         
         return np.array([new_x, new_y, new_theta])
 
-    def TrackingError(self, ref_points, state):
+
+    def StateErrorCost(self, ref_point, _state, weight):
         '''
-        input : ref_trj, state(x, y, theta)
-        output : tracking error cost
+        input : ref_point, _state(x, y, theta), weight
+        output : each step tracking error cost
         '''
 
-        err = np.array[ref_trj[0]]
+        err_mat = np.array([ref_point[0] - _state[0], ref_point[1] - _state[1], ref_point[2] - _state[2]])
+        cost = err_mat.T @ weight @ err_mat
+
+        return cost
+        
+    def InputMinimizeCost(self, _input, weight):
+        cost = _input.T @ weight @ _input
+        return cost
+
+
+               
 
 
     def SingleICR(self, x_dot, y_dot, theta_dot):
+        
         '''
         input : body velocity x_dot, y_dot, theta_dot
         output : equelity constraints delta_i, omega_i
